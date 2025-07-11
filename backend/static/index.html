@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAG Pipeline Test UI</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; background: #f9f9f9; }
+    h1 { color: #333; }
+    .section { background: #fff; padding: 1em; margin-bottom: 2em; border-radius: 8px; box-shadow: 0 2px 8px #0001; }
+    label { display: block; margin-bottom: 0.5em; }
+    input[type="file"], input[type="text"] { margin-bottom: 1em; }
+    button { padding: 0.5em 1em; border: none; background: #007bff; color: #fff; border-radius: 4px; cursor: pointer; }
+    button:disabled { background: #aaa; }
+    #answer, #ingest-result { margin-top: 1em; }
+    #health { float: right; font-size: 0.9em; }
+    .ok { color: green; }
+    .fail { color: red; }
+  </style>
+</head>
+<body>
+  <h1>RAG Pipeline Test UI <span id="health">Checking health...</span></h1>
+
+  <div class="section">
+    <h2>1. Ingest DOCX File</h2>
+    <form id="ingest-form">
+      <label for="docx-file">Select DOCX file:</label>
+      <input type="file" id="docx-file" accept=".docx" required />
+      <button type="submit">Ingest</button>
+    </form>
+    <div id="ingest-result"></div>
+  </div>
+
+  <div class="section">
+    <h2>2. Query Knowledge Base</h2>
+    <form id="query-form">
+      <label for="query-text">Enter your question:</label>
+      <input type="text" id="query-text" size="60" required />
+      <br/>
+      <label><input type="checkbox" id="agentic-toggle" /> Use Agentic/Multi-hop RAG</label>
+      <br/>
+      <label for="user-id">User ID:</label>
+      <input type="text" id="user-id" size="12" placeholder="e.g. alice123" />
+      <label for="user-role">Role:</label>
+      <input type="text" id="user-role" size="12" placeholder="e.g. BDM" />
+      <button type="submit">Ask</button>
+    </form>
+    <div id="answer"></div>
+    <div id="context-summary"></div>
+    <button id="show-more-btn" style="display:none;">Show More</button>
+    <div id="agentic-steps" style="display:none;"></div>
+    <div id="evaluation"></div>
+    <div id="feedback-ui" style="margin-top:1em;"></div>
+  </div>
+
+  <script>
+    // Health check
+    fetch('/health').then(r => r.json()).then(data => {
+      document.getElementById('health').textContent = 'API: OK';
+      document.getElementById('health').className = 'ok';
+    }).catch(() => {
+      document.getElementById('health').textContent = 'API: Unreachable';
+      document.getElementById('health').className = 'fail';
+    });
+
+    // Ingest DOCX
+    document.getElementById('ingest-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fileInput = document.getElementById('docx-file');
+      const resultDiv = document.getElementById('ingest-result');
+      if (!fileInput.files.length) return;
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      resultDiv.textContent = 'Uploading...';
+      try {
+        const resp = await fetch('/api/ingest', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await resp.json();
+        resultDiv.textContent = 'Ingestion result: ' + JSON.stringify(data);
+      } catch (err) {
+        resultDiv.textContent = 'Error: ' + err;
+      }
+    });
+
+    // Query RAG
+    document.getElementById('query-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const queryInput = document.getElementById('query-text');
+      const answerDiv = document.getElementById('answer');
+      const contextSummaryDiv = document.getElementById('context-summary');
+      const stepsDiv = document.getElementById('agentic-steps');
+      const evalDiv = document.getElementById('evaluation');
+      const feedbackDiv = document.getElementById('feedback-ui');
+      const showMoreBtn = document.getElementById('show-more-btn');
+      const agentic = document.getElementById('agentic-toggle').checked;
+      const userId = document.getElementById('user-id').value.trim();
+      const userRole = document.getElementById('user-role').value.trim();
+      const question = queryInput.value.trim();
+      answerDiv.textContent = 'Querying...';
+      contextSummaryDiv.textContent = '';
+      stepsDiv.style.display = 'none';
+      stepsDiv.textContent = '';
+      evalDiv.textContent = '';
+      feedbackDiv.textContent = '';
+      showMoreBtn.style.display = 'none';
+      let url = agentic ? '/rag/agentic_query' : '/rag/query';
+      let body = { question };
+      if (userId) body.user_id = userId;
+      if (userRole) body.profile = { role: userRole };
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        if (data.answer) {
+          answerDiv.innerHTML = '<b>Answer:</b> ' + data.answer;
+        } else if (data.answers) {
+          answerDiv.innerHTML = '<b>Answers:</b><ul>' + data.answers.map(a => `<li><b>${a.title}</b>: ${a.content}</li>`).join('') + '</ul>';
+        } else {
+          answerDiv.textContent = 'No answer found. Raw response: ' + JSON.stringify(data);
+        }
+        // Context summary
+        if (data.context_summary) {
+          contextSummaryDiv.innerHTML = '<b>Context Summary:</b> ' + data.context_summary;
+        }
+        // Agentic steps (hidden by default, show on button click)
+        if (data.steps) {
+          stepsDiv.innerHTML = '<b>Agent Reasoning Steps:</b><ol>' + data.steps.map((s, idx) => `<li><b>${s.action}</b>: ${s.input}<br/><i>Result:</i> <pre style="white-space:pre-wrap;">${typeof s.result === 'object' ? JSON.stringify(s.result, null, 2) : s.result}</pre></li>`).join('') + '</ol>';
+          showMoreBtn.style.display = 'inline-block';
+          showMoreBtn.textContent = 'Show More';
+          showMoreBtn.onclick = () => {
+            if (stepsDiv.style.display === 'none') {
+              stepsDiv.style.display = 'block';
+              showMoreBtn.textContent = 'Show Less';
+            } else {
+              stepsDiv.style.display = 'none';
+              showMoreBtn.textContent = 'Show More';
+            }
+          };
+        }
+        // Show context chunks (matches) in stepsDiv if not agentic
+        if (!data.steps && data.matches) {
+          stepsDiv.innerHTML = '<b>Context Chunks:</b><ul>' + data.matches.map(c => `<li><b>${c.title}</b>: ${c.content}</li>`).join('') + '</ul>';
+          showMoreBtn.style.display = 'inline-block';
+          showMoreBtn.textContent = 'Show More';
+          showMoreBtn.onclick = () => {
+            if (stepsDiv.style.display === 'none') {
+              stepsDiv.style.display = 'block';
+              showMoreBtn.textContent = 'Show Less';
+            } else {
+              stepsDiv.style.display = 'none';
+              showMoreBtn.textContent = 'Show More';
+            }
+          };
+        }
+        // Evaluation metrics
+        if (data.evaluation) {
+          evalDiv.innerHTML = '<b>Evaluation:</b> ' + Object.entries(data.evaluation).map(([k,v]) => `${k}: <b>${v}</b>`).join(' | ');
+        }
+        // Feedback UI
+        feedbackDiv.innerHTML = `<b>Was this answer helpful?</b> <button id="thumbs-up">👍</button> <button id="thumbs-down">👎</button><br/><input type="text" id="feedback-comment" placeholder="Add a comment (optional)" size="40"/><button id="submit-feedback">Submit Feedback</button><span id="feedback-status"></span>`;
+        document.getElementById('thumbs-up').onclick = () => document.getElementById('thumbs-up').dataset.selected = '1';
+        document.getElementById('thumbs-down').onclick = () => document.getElementById('thumbs-down').dataset.selected = '1';
+        document.getElementById('submit-feedback').onclick = async () => {
+          const rating = document.getElementById('thumbs-up').dataset.selected ? 3 : (document.getElementById('thumbs-down').dataset.selected ? 1 : 2);
+          const comment = document.getElementById('feedback-comment').value;
+          const context = data.context ? (Array.isArray(data.context) ? data.context.map(c => c.content || c) : [data.context]) : [];
+          const payload = {
+            question,
+            answer: data.answer || '',
+            context,
+            rating,
+            comments: comment
+          };
+          document.getElementById('feedback-status').textContent = 'Submitting...';
+          try {
+            const resp = await fetch('/rag/feedback', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            if (resp.ok) {
+              document.getElementById('feedback-status').textContent = 'Thank you for your feedback!';
+            } else {
+              document.getElementById('feedback-status').textContent = 'Error submitting feedback.';
+            }
+          } catch (err) {
+            document.getElementById('feedback-status').textContent = 'Error submitting feedback.';
+          }
+        };
+      } catch (err) {
+        answerDiv.textContent = 'Error: ' + err;
+      }
+    });
+  </script>
+</body>
+</html> 
